@@ -1,0 +1,92 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# ルールを記憶する
+
+指示された事柄について記憶をルールファイルとして作成します。
+
+## 場所
+
+.cursor/rules/
+
+## ファイル名
+
+アルファベットと数字とハイフンで構成された記憶のファイル名
+
+## ファイル拡張子
+
+mdとして出力後、コマンドでmdcに変換する
+
+## コンテンツ
+
+以下のコードブロックの内容を記述する。frontmatter部分は後述するルールタイプごとに変化する
+
+```
+---
+description:
+globs:
+alwaysApply:
+---
+# ルールタイトル
+
+適切なMarkdownフォーマットを行ったルール内容
+```
+
+## ルールタイプ
+
+ルールには以下のタイプがある。適切なタイプを選択する。
+
+- Always: 常に利用される
+- Auto Attached: 指定したglobに該当するファイルに利用される
+- Agent Requested: 指定したdescriptionを解釈して利用するか決定される
+- Manual: ユーザーが指定する
+
+## frontmatter
+
+frontmatterはルールタイプごとに変化する。適切なfrontmatterを記述する。
+
+### Always
+
+```
+description: 説明を記述
+globs: *
+```
+
+### Auto Attached
+
+descriptionとglobsを記述する。globsに複数のglobを指定する場合はカンマ区切りで記述する。
+
+```
+description: 説明を記述
+globs: カンマ区切りのglob
+```
+
+### Agent Requested
+
+descriptionの記述によりルールが適用されるか決定されるので、注意深くdescriptionを記述する。
+globsは絶対に記述しない。記述するとAuto Attachedになってしまう。
+
+```
+description: 説明を記述
+globs:
+alwaysApply: false
+```
+
+### Manual
+
+globsは記述しない。alwaysApplyにはfalseと記述する。
+
+```
+description: 説明を記述
+globs: 指定しない
+alwaysApply: false
+```
+
+## 作成後の報告
+
+ルールファイルを作成したら、以下の項目を報告する。
+
+- 選択したルールタイプとその理由
+- ルール内容の説明
