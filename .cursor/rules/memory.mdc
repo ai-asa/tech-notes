@@ -17,7 +17,7 @@ alwaysApply: false
 
 ## ファイル拡張子
 
-mdとして出力後、コマンドでmdcに変換する
+mdc
 
 ## コンテンツ
 
