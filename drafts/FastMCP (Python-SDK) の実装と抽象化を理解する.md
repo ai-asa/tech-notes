@@ -67,221 +67,56 @@ FastMCPは、Pythonの高度な機能を活用してMCPの複雑さを抽象化�
 
 FastMCPは、Pythonのデコレータ機能を活用して、開発者が単純なデコレータを関数に付与するだけでMCP機能として登録できる宣言的なAPIを提供しています。
 
-例えば、`@server.tool`デコレータを使用して関数を登録する際の処理シーケンスは以下のように行われます：
+{例えば`@server.tool`デコレータを使用して関数を登録する例とコード例}
 
-```python
-from mcp.server.fastmcp import FastMCP
-mcp = FastMCP("Demo Server")
-
-@mcp.tool("add")
-def add(a: int, b: int) -> int:
-    return a + b
-
-if __name__ == "__main__":
-    # SSEトランスポートを使用して起動
-    mcp.run("sse")
-```
-
-このシンプルなデコレータの使用により、内部では以下のような複雑な処理が自動的に行われています：
-
-{デコレータの実装について詳細な解説。inspectモジュールの使用方法、関数メタデータの抽出、登録システムへの連携などを説明。実際のデコレータコードと、それが内部でどのように処理されるかの例を示す。}
+{FastMCPがデコレータパターンをどのように実装しているか。デコレータの背後にある設計思想、Python標準ライブラリの`inspect`モジュールの活用方法、関数が内部でどのように登録・管理されるか、実行時にどのようにディスパッチされるかなど、抽象化の全体像と主要な実装技術について説明。}
 
 ### 型ヒントからスキーマへの自動変換
 
 FastMCPは、Pythonの型ヒントとdocstringを解析して、MCPプロトコルに必要なJSON Schemaを自動的に生成します。これにより、開発者は複雑なスキーマを手動で定義する必要がなくなります。
 
-```python
-def extract_function_metadata(func):
-    # インスペクション機能を使用して関数シグネチャを解析
-    signature = inspect.signature(func)
-    
-    # docstringを取得
-    doc = inspect.getdoc(func) or ""
-    
-    # パラメータと型ヒントを抽出
-    parameters = {}
-    for name, param in signature.parameters.items():
-        # Contextパラメータは特別扱い
-        if str(param.annotation) == "<class 'mcp.server.fastmcp.context.Context'>":
-            continue
-            
-        # 型情報をJSON Schema形式に変換
-        param_type = param.annotation
-        schema = convert_type_to_json_schema(param_type)
-        parameters[name] = schema
-    
-    return {
-        "description": doc,
-        "parameters": parameters,
-        "return_type": convert_type_to_json_schema(signature.return_annotation)
-    }
-```
+{関数メタデータを抽出し、型ヒントをJSON Schemaに変換するコード例}
 
-{型ヒント解析の実装詳細。typingモジュールの使用方法、各種Python型からJSONスキーマへの変換ロジック、特殊型（Optional, Union, List等）の処理方法、Pydanticモデルとの連携などを説明。実際の例を示す。}
+{型変換システムの設計と実装方法。Pythonの型ヒント（typing）からJSON Schemaへの変換がどのように行われるか、Pydanticとの連携方法、複雑な型（ネストされた構造、ジェネリック型など）の処理方法、この抽象化によって開発者が手動で行う必要がなくなった作業について説明。}
 
 ### 非同期通信の管理
 
-FastMCPは、asyncioを基盤とした非同期プログラミングモデルを採用し、同期処理と非同期処理を透過的に扱えるようにしています。リクエスト処理は以下のようにルーティングされます：
+FastMCPは、asyncioを基盤とした非同期プログラミングモデルを採用し、同期処理と非同期処理を透過的に扱えるようにしています。リクエスト処理は方法に応じて適切なハンドラにディスパッチされます。
 
-```python
-async def handle_request(self, request_data: dict):
-    # リクエストのメソッドを取得
-    method = request_data.get("method")
-    
-    if method.startswith("resources/"):
-        # リソースリクエストの処理
-        return await self._handle_resource_request(request_data)
-        
-    elif method.startswith("tools/"):
-        # ツールリクエストの処理
-        return await self._handle_tool_request(request_data)
-        
-    elif method.startswith("prompts/"):
-        # プロンプトリクエストの処理
-        return await self._handle_prompt_request(request_data)
-    
-    # その他のMCPメソッド（info、list等）
-    return await self._handle_utility_request(request_data)
-```
+{JSON-RPCリクエストを適切なハンドラに振り分けるルーティングコード例}
 
-{非同期処理の実装詳細。asyncioの使用方法、同期/非同期関数の自動検出と処理の分岐、イベントループ管理、非同期コンテキスト管理などを説明。コード例を含める。}
+{FastMCPの非同期処理アーキテクチャの概要。asyncioの活用方法、同期/非同期関数の自動判別と適切な実行方法、イベントループの管理、並行処理とキャンセル処理の仕組み、異なるトランスポート（stdio/SSE）間での共通抽象化レイヤーの実現方法について説明。}
 
 ### コンテキスト提供
 
 FastMCPは、各リクエスト処理に対して専用のコンテキストオブジェクトを提供し、ログ記録、進捗報告、リソースアクセスなどの機能を簡単に利用できるようにしています。これにより、ハンドラ関数は必要な機能にアクセスしやすくなっています。
 
-```python
-class Context:
-    def __init__(self, request_data: dict, server_instance):
-        # リクエストデータの保存
-        self.request_data = request_data
-        self.request_id = request_data.get("id")
-        
-        # サーバーインスタンスへの参照
-        self._server = server_instance
-        
-        # lifespan_contextがあれば追加
-        self.request_context = RequestContext(
-            lifespan_context=getattr(server_instance, "_lifespan_context", {})
-        )
-    
-    # ログメソッド
-    def debug(self, message: str, data: Optional[dict] = None):
-        self._log("debug", message, data)
-    
-    def info(self, message: str, data: Optional[dict] = None):
-        self._log("info", message, data)
-    
-    def warning(self, message: str, data: Optional[dict] = None):
-        self._log("warning", message, data)
-    
-    def error(self, message: str, data: Optional[dict] = None):
-        self._log("error", message, data)
-    
-    # 内部ログ処理
-    def _log(self, level: str, message: str, data: Optional[dict] = None):
-        log_data = {
-            "level": level,
-            "message": message
-        }
-        if data:
-            log_data["data"] = data
-            
-        # サーバーのログコールバックを呼び出す
-        self._server._emit_log(log_data, self.request_id)
-    
-    # 進捗報告
-    async def report_progress(self, current: int, total: int):
-        # 進捗情報をクライアントに送信
-        progress_data = {
-            "current": current,
-            "total": total
-        }
-        await self._server._emit_progress(progress_data, self.request_id)
-    
-    # リソース読み取り
-    async def read_resource(self, uri: str):
-        # サーバー内の別のリソースを読み取る
-        return await self._server._read_resource_internal(uri)
-```
+{Contextクラスの基本構造と主要メソッドの例}
 
-{コンテキスト機能の実装詳細。Contextクラスの設計、リクエスト間のコンテキスト分離、依存性注入の仕組み、ライフサイクル管理との連携などを説明。実際のContextクラスの使用例を示す。}
+{コンテキスト機能の設計思想と実装方法。コンテキストオブジェクト指向設計の利点、リクエスト間での状態分離の仕組み、コンテキストを通じた機能提供（ログ記録、進捗報告、リソースアクセスなど）の実現方法、依存性注入パターンの活用、リクエストライフサイクル全体を通じてのコンテキスト管理について説明。}
 
 ### URIベースのリソースシステム
 
 FastMCPは、URIテンプレートを使った直感的なリソース定義と、効率的なパラメータ抽出機能を提供しています。リソースのURIパターンは正規表現に変換され、リクエスト時に効率的にマッチングされます。
 
-```python
-def _register_resource_template(self, template: str, func):
-    # URIテンプレート（例："users://{user_id}/profile"）を
-    # 正規表現パターン（例："users://(?P<user_id>[^/]+)/profile"）に変換
-    pattern_str = re.sub(r'\{([^}]+)\}', r'(?P<\1>[^/]+)', template)
-    pattern = re.compile(f"^{pattern_str}$")
-    
-    self._template_resources[template] = (func, pattern)
+{URIテンプレート処理と正規表現変換の例}
 
-def _match_resource_uri(self, uri: str):
-    # 静的URIでの完全一致を最初に試みる
-    if uri in self._static_resources:
-        return self._static_resources[uri], {}
-    
-    # テンプレートURIのマッチングを試みる
-    for template, (func, pattern) in self._template_resources.items():
-        match = pattern.match(uri)
-        if match:
-            # パターンにマッチした場合、パラメータを抽出
-            params = match.groupdict()
-            return func, params
-    
-    return None, {}
-```
-
-{URIシステムの実装詳細。テンプレート解析と正規表現変換、パラメータ抽出ロジック、マッチング優先順位の処理などを説明。URIテンプレートを使った実際の例を示す。}
+{URIベースリソースシステムの設計と実装方法。パスパラメータをサポートするURIテンプレート構文の設計、正規表現エンジンを活用したマッチングと優先順位の実装、パラメータ抽出と型変換の自動化、階層化されたリソース構造のサポート、この抽象化によって実現される柔軟なリソースアドレス指定について説明。}
 
 ## lifespan管理の実装
 
 FastMCPは、サーバーの起動時と終了時に共有リソースを効率的に管理するための、lifespanコンテキストマネージャをサポートしています。これにより、データベース接続などの共有リソースをツール間で効率的に管理できます。
 
-```python
-async def _setup_lifespan(self, lifespan):
-    """lifespanコンテキストマネージャのセットアップ"""
-    if lifespan is None:
-        # lifespanが指定されていない場合は空のコンテキストを使用
-        self._lifespan_context = {}
-        return
-        
-    try:
-        # lifespanコンテキストマネージャを開始
-        self._lifespan_cm = lifespan()
-        self._lifespan_context = await self._lifespan_cm.__aenter__()
-    except Exception as e:
-        self.logger.error(f"Error setting up lifespan: {str(e)}")
-        self._lifespan_context = {}
+{lifespanセットアップと終了処理の実装例}
 
-async def _cleanup_lifespan(self):
-    """lifespanコンテキストマネージャのクリーンアップ"""
-    if hasattr(self, "_lifespan_cm"):
-        try:
-            await self._lifespan_cm.__aexit__(None, None, None)
-        except Exception as e:
-            self.logger.error(f"Error cleaning up lifespan: {str(e)}")
-```
-
-{lifespan管理の実装詳細。非同期コンテキストマネージャの使用方法、リソース初期化と終了処理の管理、エラーハンドリング、コンテキスト伝播の仕組みなどを説明。実際の使用例を示す。}
+{サーバーライフサイクル管理の設計と実装方法。非同期コンテキストマネージャパターンの活用、アプリケーション状態の管理と共有、リソース初期化と終了処理の保証メカニズム、エラー処理とグレースフルシャットダウン、FastMCPの他のコンポーネントとのライフサイクル連携について説明。}
 
 ## 処理フロー
-{リクエスト処理フローの詳細説明。リクエスト受信からレスポンス送信までの各ステップ、コンポーネント間の相互作用、エラー処理の流れなどを説明。シーケンス図やフロー図を用いて視覚的に表現。}
+{FastMCPにおけるリクエスト処理の全体的なフロー。クライアントからリクエストが到着してからレスポンスが返されるまでの各段階、関与するコンポーネントとその相互作用、データの流れ、重要な分岐点とエラー処理の仕組みについて、シーケンス図やフロー図を用いて視覚的に説明。FastMCPの抽象化レイヤーがリクエスト処理全体をどのように簡素化しているかを強調。}
 
 ## まとめ
 
 FastMCPは、MCPプロトコルの複雑さを様々なレベルで抽象化し、開発者が本質的な機能実装に集中できるようにします。デコレータ、型ヒント解析、非同期処理、コンテキスト提供などの技術を巧みに組み合わせることで、簡潔で直感的なAPIと強力な内部実装を両立させています。
 
 これらの抽象化により、通常は多くのコードが必要な複雑なMCPサーバーが、少ないコードで実装可能になります。また、独自のMCPサーバーを実装する場合は、FastMCPの抽象化アプローチを参考にすることで、効率的な設計が可能になるでしょう。
-
-## 参考リソース
-
-- [MCP仕様](https://github.com/anthropics/anthropic-cookbook/tree/main/mcp/spec)
-- [Python SDK ソースコード](https://github.com/modelcontextprotocol/python-sdk)
-- [JSON-RPC 2.0仕様](https://www.jsonrpc.org/specification)
-- [FastMCP実装の詳細解説](https://github.com/modelcontextprotocol/python-sdk/tree/main/docs)
 
