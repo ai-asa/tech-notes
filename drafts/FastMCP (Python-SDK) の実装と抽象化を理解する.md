@@ -23,147 +23,442 @@ https://github.com/modelcontextprotocol/python-sdk
 
 # MCPの実装について
 ## 前提となる知識
-### MPCの通信プロトコル
-MCP の通信は、JSON-RPC 2.0 プロトコルに基づいています。クライアントとサーバ間の通信は、標準入出力（stdio）または HTTP with Server-Sent Events（SSE）トランスポートを通じて行われます。
+### MCPの通信プロトコル
+MCP の通信は、JSON-RPC 2.0 プロトコルに基づいています。これはシンプルなテキストベースのプロトコルで、クライアントとサーバー間での関数呼び出しを可能にします。MCP通信は標準入出力（stdio）または HTTP with Server-Sent Events（SSE）を介して行われ、全てのメッセージはJSON形式で送受信されます。例えば、ツール呼び出しのリクエストは `{"jsonrpc": "2.0", "method": "call_tool", "params": {"name": "add", "arguments": {"a": 5, "b": 3}}, "id": 123}` のような形式となります。詳細は[JSON-RPC 2.0仕様](https://www.jsonrpc.org/specification)を参照してください。
 
-JSON-RPC 2.0は、リモートプロシージャコールを実現するためのシンプルなプロトコルです。基本的なリクエストとレスポンスの構造は以下のようになっています：
+### 通信トランスポート
+MCPは２種類のトランスポートをサポートしています。stdioトランスポートはもっともシンプルで、標準入出力を使って1行ごとにJSON-RPCメッセージを送受信します。これはコマンドラインツールやサブプロセスとの統合に適しています。一方、SSE（Server-Sent Events）トランスポートはHTTPベースで、サーバーからクライアントへの一方向のリアルタイム通信が可能です。クライアントはGETリクエストでSSE接続を確立し、サーバーはこの接続を通じてメッセージを送信します。クライアントからサーバーへのメッセージは別のPOSTリクエストで行われます。SSEについては[MDN Web Docs](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)に詳しい説明があります。
 
-```json
-// リクエスト
-{
-  "jsonrpc": "2.0",
-  "method": "call_tool",
-  "params": {
-    "name": "add",
-    "arguments": {"a": 5, "b": 3}
-  },
-  "id": 123
-}
+### ASGI対応
+MCPサーバーはASGI（Asynchronous Server Gateway Interface）に対応しており、FastAPI、Starlette、Uvicornなど主要なPythonウェブフレームワークと簡単に統合できます。ASGIは非同期Webアプリケーションのための標準インターフェースで、`async def app(scope, receive, send)`という形式で実装されます。FastMCPはStarletteを使用してASGIアプリケーションを構築し、SSEエンドポイントとHTTPメッセージングを提供します。ASGIの詳細は[ASGI仕様](https://asgi.readthedocs.io/en/latest/)をご覧ください。
 
-// レスポンス
-{
-  "jsonrpc": "2.0",
-  "result": {"content": "8", "mime_type": "text/plain"},
-  "id": 123
-}
-```
+## MCPの処理フロー
+一般的なMCPサーバーの処理の例として、SSE接続における**初回接続確立からツールの使用**までのMCPサーバーとクライアント間のデータフローを解説します。
 
-MCPでは、これらのJSON-RPCメッセージが`types.JSONRPCMessage`クラスとしてシリアライズ/デシリアライズされます。
+### 初回接続確立時のフロー
+1. クライアント接続開始：
+ - クライアントがSSEエンドポイント(`/sse`)に接続
+ - サーバーはSSE接続を確立してセッションIDを生成
+2. 初期化リクエスト：
+ - クライアントが`initialize`リクエストを送信
+ - 内容：`InitializeRequestParams`（プロトコルバージョン、クライアント情報、サポート機能）
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "id": "req-1",
+     "method": "initialize",
+     "params": {
+       "protocolVersion": "2024-11-05",
+       "capabilities": { ... },
+       "clientInfo": {
+         "name": "クライアント名",
+         "version": "1.0.0"
+       }
+     }
+   }
+ ```
 
-### stdioトランスポート
-標準入出力（stdio）トランスポートは最もシンプルなMCP接続方法で、1行ごとのJSON-RPCメッセージのやり取りで実装されています。以下は実際の動作フロー：
+3. 初期化レスポンス：
+ - サーバーが`InitializeResult`を返信
+ - 内容：プロトコルバージョン、サーバー情報、サポート機能
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "id": "req-1",
+     "result": {
+       "protocolVersion": "2024-11-05",
+       "capabilities": {
+         "tools": { "listChanged": true },
+         "resources": { "subscribe": false, "listChanged": true },
+         "prompts": { "listChanged": true }
+       },
+       "serverInfo": {
+         "name": "FastMCP",
+         "version": "1.0.0"
+       },
+       "instructions": "オプションの説明テキスト"
+     }
+   }
+ ```
+4. 初期化完了通知：
+ - クライアントが`initialized`通知を送信
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "method": "notifications/initialized",
+     "params": {}
+   }
+ ```
+### ツール呼び出しまでのフロー
+1. ツール一覧取得：
+ - クライアントが`tools/list`リクエストを送信
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "id": "req-2",
+     "method": "tools/list",
+     "params": {}
+   }
+ ```
+2. ツール一覧レスポンス：
+ - サーバーが`ListToolsResult`を返信
+ - 各ツールの名前、説明、入力スキーマを含む
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "id": "req-2",
+     "result": {
+       "tools": [
+         {
+           "name": "get_weather",
+           "description": "都市の天気情報を取得する",
+           "inputSchema": {
+             "type": "object",
+             "properties": {
+               "city": { "type": "string" }
+             },
+             "required": ["city"]
+           }
+         }
+       ]
+     }
+   }
+ ```
+3. ツール呼び出し：
+ - クライアントが`tools/call`リクエストを送信
+ - 呼び出すツール名と引数を指定
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "id": "req-3",
+     "method": "tools/call",
+     "params": {
+       "name": "get_weather",
+       "arguments": {
+         "city": "東京"
+       },
+       "_meta": {
+         "progressToken": "progress-1"
+       }
+     }
+   }
+ ```
+4. 進捗通知（オプション）：
+ - サーバーが`notifications/progress`通知を送信
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "method": "notifications/progress",
+     "params": {
+       "progressToken": "progress-1",
+       "progress": 50,
+       "total": 100
+     }
+   }
+ ```
+5. ツール呼び出し結果：
+ - サーバーが`CallToolResult`を返信
+ - テキスト、画像、埋め込みリソースなどの形式で結果を返す
+ ``` json
+    {
+     "jsonrpc": "2.0",
+     "id": "req-3",
+     "result": {
+       "content": [
+         {
+           "type": "text",
+           "text": "東京の天気: 晴れ、気温: 25°C"
+         }
+       ],
+       "isError": false
+     }
+   }
+ ```
 
-1. クライアントは標準入力を通じてJSON-RPCリクエストを送信（1行に1リクエスト）
-2. サーバーは標準出力にJSON-RPCレスポンスを書き込む（1行に1レスポンス）
-3. すべての通信はUTF-8エンコードされた文字列として扱われる
-
-MCPのsdtioトランスポートは`mcp.server.stdio`モジュールで実装されており、任意のstdinとstdoutストリームをラップし、非同期オブジェクトストリームに変換します。
-
-### SSE
-Server-Sent Events（SSE）は、サーバーからクライアントへの一方向のリアルタイム通信を可能にするHTTPベースの技術です。MCPの場合：
-
-1. クライアントはサーバーにHTTP GET接続を確立し、`text/event-stream`コンテンツタイプを受信
-2. サーバーはこの接続を通じて非同期にメッセージを送信
-3. クライアントからサーバーへのメッセージは別のHTTP POSTリクエストで送信
-
-MCPのSSEトランスポートは`mcp.server.sse`モジュールの`SseServerTransport`クラスで実装されており、以下の機能を提供：
-
-1. `connect_sse`メソッド：SSEのHTTP接続を処理し、クライアントに一意のセッションIDを発行
-2. `handle_post_message`メソッド：クライアントからのHTTP POSTリクエストを処理し、メッセージをセッションに関連付ける
-
-### ASGI
-ASGI（Asynchronous Server Gateway Interface）は、非同期WebアプリケーションのためのPythonの標準インターフェースです。MCPのSSEトランスポートはASGIアプリケーションとして実装されており、StarlettやUvicornなどのASGIサーバーで簡単に実行できます。
-
-ASGIインターフェースは`app(scope, receive, send)`シグネチャを持つ関数として実装され、MCPサーバーはこのインターフェースを使用してHTTPエンドポイントを公開します。FastMCPはStarletteフレームワークを使用して、ASGIエンドポイントを簡単に作成できるようにしています。
-
-## MCPの主要な実装
-### 構成
-MCPを実装するためには、以下の主要コンポーネントが必要です：
-
-1. **トランスポートレイヤー**：JSON-RPC通信を処理（stdio/SSE）
-2. **セッション管理**：クライアントとの接続を管理
-3. **要求処理システム**：JSON-RPCリクエストを受け取り、適切なハンドラーに転送
-4. **ハンドラー登録**：ツール、リソース、プロンプトなどの機能を登録
-5. **コンテキスト管理**：リクエスト間の状態と情報を管理
-6. **スキーマ生成**：型からJSON Schemaを自動生成
-
-python-SDKでは、これらの機能が以下のモジュールに分かれています：
-
-- `mcp.types`：MCPのデータ型と変換機能
-- `mcp.server.lowlevel`：低レベルなMCPサーバー実装
-- `mcp.server.stdio`/`mcp.server.sse`：トランスポート実装
-- `mcp.server.session`：セッション管理
-- `mcp.server.fastmcp`：高レベルな抽象化API
-
-### 簡単な実装
-FastMCPを使わずに、低レベルのAPIを使用してMCPサーバーを実装する最小限のコードは以下のようになります：
+### 一般的なPythonモジュールによる実装
+FastMCPやpython-SDKを使わずに、標準ライブラリと一般的なPythonパッケージだけで前述の処理フローを実装した最小限のMCPサーバー例を示します：
 
 ```python
 import asyncio
-from mcp.server.lowlevel.server import Server
-import mcp.types as types
-from mcp.server.stdio import stdio_server
-from mcp.server.models import InitializationOptions
+import json
+import sys
+import uuid
+from typing import Any, Dict, List, Optional, Union
 
-# サーバーインスタンスの作成
-server = Server("My Low-Level MCP Server")
+# JSON-RPC 2.0のメッセージ構造を定義
+class JsonRpcRequest:
+    def __init__(self, method: str, params: Any, id: Union[str, int]):
+        self.jsonrpc = "2.0"
+        self.method = method
+        self.params = params
+        self.id = id
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        return cls(data.get("method"), data.get("params"), data.get("id"))
+    
+    def to_dict(self):
+        return {
+            "jsonrpc": self.jsonrpc,
+            "method": self.method,
+            "params": self.params,
+            "id": self.id
+        }
 
-# リクエストハンドラーの登録
-@server.list_tools()
-async def handle_list_tools():
-    """利用可能なツールの一覧を返す"""
-    return [
-        types.Tool(
-            name="add",
-            description="Add two numbers",
-            inputSchema={"type": "object", "properties": {
-                "a": {"type": "number"},
-                "b": {"type": "number"}
-            }, "required": ["a", "b"]}
+class JsonRpcResponse:
+    def __init__(self, result: Any, id: Union[str, int]):
+        self.jsonrpc = "2.0"
+        self.result = result
+        self.id = id
+    
+    def to_dict(self):
+        return {
+            "jsonrpc": self.jsonrpc,
+            "result": self.result,
+            "id": self.id
+        }
+
+class JsonRpcNotification:
+    def __init__(self, method: str, params: Any):
+        self.jsonrpc = "2.0"
+        self.method = method
+        self.params = params
+    
+    def to_dict(self):
+        return {
+            "jsonrpc": self.jsonrpc,
+            "method": self.method,
+            "params": self.params
+        }
+
+class JsonRpcError:
+    def __init__(self, error: Dict[str, Any], id: Union[str, int]):
+        self.jsonrpc = "2.0"
+        self.error = error
+        self.id = id
+    
+    def to_dict(self):
+        return {
+            "jsonrpc": self.jsonrpc,
+            "error": self.error,
+            "id": self.id
+        }
+
+# MCPサーバー実装
+class MinimalMcpServer:
+    def __init__(self, name: str, version: str = "1.0.0", instructions: str = None):
+        self.name = name
+        self.version = version
+        self.instructions = instructions
+        self.tools = {}
+        self.resources = {}
+        self.sessions = {}
+        self.protocol_version = "2024-11-05"
+        
+        # メソッドハンドラーの登録
+        self.method_handlers = {
+            "initialize": self.handle_initialize,
+            "tools/list": self.handle_list_tools,
+            "tools/call": self.handle_call_tool,
+            "resources/list": self.handle_list_resources,
+            "resources/read": self.handle_read_resource,
+        }
+    
+    # 初期化ハンドラー
+    async def handle_initialize(self, params: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+        client_info = params.get("clientInfo", {})
+        client_capabilities = params.get("capabilities", {})
+        
+        # セッション情報を保存
+        session_id = str(uuid.uuid4())
+        self.sessions[session_id] = {
+            "client_info": client_info,
+            "capabilities": client_capabilities
+        }
+        
+        # サーバー情報と機能を返す
+        return {
+            "protocolVersion": self.protocol_version,
+            "serverInfo": {
+                "name": self.name,
+                "version": self.version
+            },
+            "capabilities": {
+                "tools": {"listChanged": True},
+                "resources": {"subscribe": False, "listChanged": True},
+                "prompts": {"listChanged": True}
+            },
+            "instructions": self.instructions
+        }
+    
+    # ツール登録
+    def register_tool(self, name: str, description: str, input_schema: Dict[str, Any], handler_func):
+        self.tools[name] = {
+            "name": name, 
+            "description": description,
+            "inputSchema": input_schema,
+            "handler": handler_func
+        }
+    
+    # ツール一覧ハンドラー
+    async def handle_list_tools(self, params: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+        tools = []
+        for name, tool in self.tools.items():
+            tools.append({
+                "name": tool["name"],
+                "description": tool["description"],
+                "inputSchema": tool["inputSchema"]
+            })
+        return {"tools": tools}
+    
+    # ツール呼び出しハンドラー
+    async def handle_call_tool(self, params: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        meta = params.get("_meta", {})
+        progress_token = meta.get("progressToken")
+        
+        if tool_name not in self.tools:
+            raise ValueError(f"Unknown tool: {tool_name}")
+        
+        tool = self.tools[tool_name]
+        
+        # 進捗通知を送信（オプション）
+        if progress_token:
+            await self.send_progress_notification(progress_token, 50, 100)
+        
+        # ツール実行
+        result = await tool["handler"](arguments)
+        
+        # 結果をフォーマット
+        if isinstance(result, str):
+            content = [{"type": "text", "text": result}]
+        elif isinstance(result, dict) and "type" in result:
+            content = [result]
+        elif isinstance(result, list):
+            content = result
+        else:
+            content = [{"type": "text", "text": str(result)}]
+        
+        return {
+            "content": content,
+            "isError": False
+        }
+    
+    # 進捗通知の送信
+    async def send_progress_notification(self, token: str, progress: int, total: int = None):
+        notification = JsonRpcNotification(
+            "notifications/progress",
+            {
+                "progressToken": token,
+                "progress": progress,
+                "total": total
+            }
         )
-    ]
+        await self.send_message(notification.to_dict())
+    
+    # リソース関連のハンドラーは省略...
+    
+    # リクエスト処理のメインループ
+    async def process_request(self, request_data: Dict[str, Any]):
+        try:
+            method = request_data.get("method")
+            params = request_data.get("params", {})
+            request_id = request_data.get("id")
+            
+            # メソッドの種類に基づいて処理
+            if method == "notifications/initialized":
+                # 初期化完了通知の処理
+                return None
+            
+            if method not in self.method_handlers:
+                error = {"code": -32601, "message": f"Method not found: {method}"}
+                return JsonRpcError(error, request_id).to_dict()
+            
+            # ハンドラー呼び出し
+            handler = self.method_handlers[method]
+            result = await handler(params, request_id)
+            
+            # レスポンス返却
+            return JsonRpcResponse(result, request_id).to_dict()
+            
+        except Exception as e:
+            error = {"code": -32603, "message": f"Internal error: {str(e)}"}
+            return JsonRpcError(error, request_data.get("id")).to_dict()
+    
+    # メッセージ送信
+    async def send_message(self, message: Dict[str, Any]):
+        print(json.dumps(message), flush=True)
+    
+    # stdin/stdoutによるMCPサーバー実行
+    async def run_stdio(self):
+        try:
+            while True:
+                # 入力を読み取り
+                line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+                if not line:
+                    break
+                
+                # JSONパース
+                try:
+                    request_data = json.loads(line)
+                    
+                    # リクエスト処理
+                    response = await self.process_request(request_data)
+                    if response:
+                        await self.send_message(response)
+                        
+                except json.JSONDecodeError:
+                    error = {"code": -32700, "message": "Parse error"}
+                    await self.send_message(JsonRpcError(error, None).to_dict())
+                    
+        except Exception as e:
+            print(f"Server error: {e}", file=sys.stderr)
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: dict):
-    """ツールを呼び出す"""
-    if name == "add":
-        result = arguments["a"] + arguments["b"]
-        return [types.TextContent(content=str(result))]
-    raise ValueError(f"Unknown tool: {name}")
-
-@server.list_resources()
-async def handle_list_resources():
-    """利用可能なリソースの一覧を返す"""
-    return [
-        types.Resource(
-            uri="hello://world",
-            name="Hello World",
-            description="A simple greeting",
-            mimeType="text/plain"
-        )
-    ]
-
-@server.read_resource()
-async def handle_read_resource(uri):
-    """リソースの内容を読み取る"""
-    if uri == "hello://world":
-        return "Hello, World!"
-    raise ValueError(f"Unknown resource: {uri}")
-
-# サーバーの実行
+# 使用例
 async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    # サーバー作成
+    server = MinimalMcpServer(
+        name="MinimalMCP", 
+        version="0.1.0",
+        instructions="Minimal MCP server implementation example"
+    )
+    
+    # 天気情報ツールの登録
+    server.register_tool(
+        name="get_weather",
+        description="都市の天気情報を取得する",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"}
+            },
+            "required": ["city"]
+        },
+        handler_func=weather_handler
+    )
+    
+    # ツールハンドラー実装
+    async def weather_handler(arguments):
+        city = arguments.get("city", "不明")
+        # 実際には天気APIを呼び出すなどの処理
+        return f"{city}の天気: 晴れ、気温: 25°C"
+    
+    # サーバー実行
+    await server.run_stdio()
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-この低レベル実装では、各ハンドラーが明示的に登録され、型の変換や検証も手動で行う必要があります。FastMCPはこれらを大幅に簡素化します。
+この実装では、「MCPの処理フロー」セクションで説明した初期化から始まるツール呼び出しのフローに対応しています。具体的には:
+
+1. `initialize`メソッドでクライアント接続を受け付け、サーバー情報とサポート機能を返す
+2. `tools/list`と`tools/call`を処理する専用ハンドラーを用意
+3. 進捗通知のサポート
+4. JSON-RPC 2.0に準拠したリクエスト/レスポンス処理
+
+ただし、この実装は最小限のものであり、エラー処理、型検証、セッション管理、リソース管理などの多くの詳細は省略または簡略化されています。FastMCPは、これらすべての複雑な処理を抽象化し、開発者が核となる機能実装に集中できるよう支援します。
 
 # FastMCPの実装と抽象化
 
